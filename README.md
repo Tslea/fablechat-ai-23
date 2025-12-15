@@ -1,4 +1,4 @@
-# 🏰 Fantasy World RAG - Living Character System
+# Ueasys
 
 > Un sistema avanzato di personaggi fantasy viventi basato su RAG (Retrieval-Augmented Generation)
 
