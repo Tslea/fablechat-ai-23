@@ -32,6 +32,8 @@ router = APIRouter()
 # Initialize systems
 _rag_system: Optional[RAGSystem] = None
 _character_engines: dict[str, CharacterEngine] = {}
+_character_cache: dict[str, tuple[Character, float]] = {}  # Cache with timestamp
+_cache_ttl = 300  # 5 minutes cache TTL
 
 
 def get_rag_system() -> RAGSystem:
@@ -40,6 +42,31 @@ def get_rag_system() -> RAGSystem:
     if _rag_system is None:
         _rag_system = RAGSystem()
     return _rag_system
+
+
+async def get_cached_character(character_id: str, session: AsyncSession) -> Optional[Character]:
+    """Get character from cache or database."""
+    import time
+    current_time = time.time()
+    
+    # Check cache
+    if character_id in _character_cache:
+        character, timestamp = _character_cache[character_id]
+        # Return cached if not expired
+        if current_time - timestamp < _cache_ttl:
+            return character
+    
+    # Fetch from database
+    result = await session.execute(
+        select(Character).where(Character.id == character_id)
+    )
+    character = result.scalar_one_or_none()
+    
+    # Cache the result
+    if character:
+        _character_cache[character_id] = (character, current_time)
+    
+    return character
 
 
 async def get_character_engine(character: Character) -> CharacterEngine:
@@ -194,11 +221,8 @@ async def send_message(
     Raises:
         HTTPException: If character not found
     """
-    # Get character
-    result = await session.execute(
-        select(Character).where(Character.id == data.character_id)
-    )
-    character = result.scalar_one_or_none()
+    # Get character from cache
+    character = await get_cached_character(data.character_id, session)
     
     if not character:
         raise HTTPException(status_code=404, detail="Character not found")
@@ -343,11 +367,8 @@ async def _handle_ws_message(
 ) -> None:
     """Handle a WebSocket chat message."""
     async with get_session() as session:
-        # Get character
-        result = await session.execute(
-            select(Character).where(Character.id == character_id)
-        )
-        character = result.scalar_one_or_none()
+        # Get character from cache
+        character = await get_cached_character(character_id, session)
         
         if not character:
             await manager.send_message(client_id, {

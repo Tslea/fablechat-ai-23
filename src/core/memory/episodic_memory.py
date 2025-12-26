@@ -236,16 +236,20 @@ class EpisodicMemory(LoggerMixin):
         current_time = datetime.now()
         query_lower = query.lower()
         
-        # Filter memories
-        candidates = []
+        # Pre-filter by importance and time window first (before text matching)
+        # This is more efficient than checking text match on every item
+        cutoff_time = current_time - time_window if time_window else None
+        
+        # Filter and score memories in a single pass
+        candidates: list[tuple[float, EpisodeMemoryItem]] = []
+        
         for memory in self._memories.values():
-            # Apply filters
+            # Apply quick filters first (avoid expensive operations)
             if memory.importance < min_importance:
                 continue
             
-            if time_window:
-                if current_time - memory.timestamp > time_window:
-                    continue
+            if cutoff_time and memory.timestamp < cutoff_time:
+                continue
             
             if emotion_filter and memory.emotion != emotion_filter:
                 continue
@@ -254,14 +258,23 @@ class EpisodicMemory(LoggerMixin):
             if self._matches_query(memory, query_lower):
                 relevance = memory.calculate_relevance_score(current_time)
                 candidates.append((relevance, memory))
+                
+                # Early termination if we have enough high-relevance results
+                # (only if we have significantly more than needed)
+                if len(candidates) > top_k * 3:
+                    # Sort what we have so far and trim
+                    candidates.sort(key=lambda x: x[0], reverse=True)
+                    candidates = candidates[:top_k * 2]
         
         # Sort by relevance and return top_k
         candidates.sort(key=lambda x: x[0], reverse=True)
         results = [mem for _, mem in candidates[:top_k]]
         
-        # Mark as accessed
+        # Mark as accessed (batch operation)
+        current_access_time = datetime.now()
         for memory in results:
-            memory.mark_accessed()
+            memory.access_count += 1
+            memory.last_accessed = current_access_time
         
         self.logger.debug(
             "Retrieved episodic memories",
@@ -307,20 +320,24 @@ class EpisodicMemory(LoggerMixin):
             return
         
         current_time = datetime.now()
+        to_remove = len(self._memories) - self.max_memories
         
-        # Calculate relevance for all memories
+        # Use heap for more efficient top-k selection instead of full sort
+        # We only need to find the lowest scoring memories to remove
+        import heapq
+        
+        # Calculate relevance for all memories (unavoidable for correctness)
         scored_memories = [
-            (mem.calculate_relevance_score(current_time), mem_id, mem)
+            (mem.calculate_relevance_score(current_time), mem_id)
             for mem_id, mem in self._memories.items()
         ]
         
-        # Sort by relevance (lowest first)
-        scored_memories.sort(key=lambda x: x[0])
+        # Use heapq.nsmallest to efficiently find lowest scoring items
+        # This is O(n log k) instead of O(n log n) for full sort
+        to_remove_items = heapq.nsmallest(to_remove, scored_memories, key=lambda x: x[0])
         
         # Remove lowest scoring memories
-        to_remove = len(self._memories) - self.max_memories
-        for i in range(to_remove):
-            _, mem_id, _ = scored_memories[i]
+        for _, mem_id in to_remove_items:
             del self._memories[mem_id]
         
         self.logger.info(

@@ -409,14 +409,23 @@ class CharacterEngine(LoggerMixin):
         # Add user message to context
         context.add_message("user", message)
         
-        # Update emotional state based on message
+        # Update emotional state based on message (must be done first)
         await self._analyze_and_update_emotion(message, context)
         
-        # Retrieve relevant knowledge
-        retrieved_knowledge = await self._retrieve_knowledge(message, context)
+        # Retrieve relevant knowledge and memories in parallel (independent operations)
+        retrieved_knowledge, memories = await asyncio.gather(
+            self._retrieve_knowledge(message, context),
+            self._retrieve_memories(message, context),
+            return_exceptions=True,
+        )
         
-        # Retrieve relevant memories
-        memories = await self._retrieve_memories(message, context)
+        # Handle exceptions from parallel retrieval
+        if isinstance(retrieved_knowledge, Exception):
+            self.logger.error("Failed to retrieve knowledge", error=str(retrieved_knowledge))
+            retrieved_knowledge = []
+        if isinstance(memories, Exception):
+            self.logger.error("Failed to retrieve memories", error=str(memories))
+            memories = []
         
         # Generate response
         response_text, thinking = await self._generate_response(
@@ -672,7 +681,8 @@ class CharacterEngine(LoggerMixin):
         memories: list[dict[str, Any]],
     ) -> str:
         """Build the full prompt for LLM generation."""
-        parts = [
+        # Use list for efficient string building
+        parts: list[str] = [
             "You are a living fantasy character. Stay completely in character.",
             "",
             self.personality.generate_personality_prompt(),
@@ -683,46 +693,53 @@ class CharacterEngine(LoggerMixin):
         if self._use_advanced_emotions and self.advanced_emotional_state:
             parts.append(self.advanced_emotional_state.get_response_modifier())
             summary = self.advanced_emotional_state.get_summary()
-            parts.append(f"\nValence: {summary['valence']:.2f} (negative←→positive)")
-            parts.append(f"Arousal: {summary['arousal']:.2f} (calm←→activated)")
-            parts.append(f"Dominance: {summary['dominance']:.2f} (submissive←→dominant)")
+            # Build emotional state info efficiently
+            parts.extend([
+                f"\nValence: {summary['valence']:.2f} (negative←→positive)",
+                f"Arousal: {summary['arousal']:.2f} (calm←→activated)",
+                f"Dominance: {summary['dominance']:.2f} (submissive←→dominant)",
+            ])
             if summary.get("dominant_system"):
                 parts.append(f"Primary drive: {summary['dominant_system']}")
         else:
             parts.append(self.emotional_state.generate_emotion_prompt_section())
         parts.append("")
         
-        # Add retrieved knowledge
+        # Add retrieved knowledge (limit and build efficiently)
         if knowledge:
             parts.append("\n## Relevant Knowledge")
-            for k in knowledge[:5]:
-                content = k.get("content", "")
-                if content:
-                    parts.append(f"- {content[:200]}")
+            # Use list comprehension with filtering for better performance
+            parts.extend(
+                f"- {k.get('content', '')[:200]}"
+                for k in knowledge[:5]
+                if k.get('content')
+            )
         
-        # Add relevant memories
+        # Add relevant memories (limit and build efficiently)
         if memories:
             parts.append("\n## Relevant Memories")
-            for m in memories[:3]:
-                content = m.get("content", "")
-                if content:
-                    parts.append(f"- {content[:150]}")
+            # Use list comprehension with filtering
+            parts.extend(
+                f"- {m.get('content', '')[:150]}"
+                for m in memories[:3]
+                if m.get('content')
+            )
         
         # Add conversation history
         history = context.to_prompt_history(count=6)
         if history:
-            parts.append("\n## Recent Conversation")
-            parts.append(history)
+            parts.extend(["\n## Recent Conversation", history])
         
         # Add the current message
-        parts.append(f"\n## Current Message from User")
-        parts.append(message)
+        parts.extend([
+            "\n## Current Message from User",
+            message,
+            "\n## Instructions",
+            "Respond as this character would, staying true to their personality, knowledge, and current emotional state.",
+            "Keep the response natural and in character. Do not break character or acknowledge being an AI.",
+        ])
         
-        # Add response instructions
-        parts.append("\n## Instructions")
-        parts.append("Respond as this character would, staying true to their personality, knowledge, and current emotional state.")
-        parts.append("Keep the response natural and in character. Do not break character or acknowledge being an AI.")
-        
+        # Use join for efficient final string construction
         return "\n".join(parts)
     
     def _generate_placeholder_response(self, message: str) -> str:

@@ -195,22 +195,43 @@ class RAGRetriever(LoggerMixin):
             try:
                 if self._settings.openai_api_key:
                     from openai import AsyncOpenAI
+                    from functools import lru_cache
                     
+                    # Create client once and reuse
                     client = AsyncOpenAI(api_key=self._settings.openai_api_key)
                     
+                    # Cache to avoid redundant embedding calls for same text
+                    embedding_cache: dict[str, list[float]] = {}
+                    
                     async def embed(text: str) -> list[float]:
+                        # Check cache first
+                        if text in embedding_cache:
+                            return embedding_cache[text]
+                        
                         response = await client.embeddings.create(
                             model=self._embedding_model,
                             input=[text],
                         )
-                        return response.data[0].embedding
+                        embedding = response.data[0].embedding
+                        
+                        # Cache the result (limit cache size to prevent memory issues)
+                        if len(embedding_cache) < 1000:
+                            embedding_cache[text] = embedding
+                        
+                        return embedding
                     
                     self._embed_function = embed
                 else:
                     # Mock embedder for development
                     import hashlib
                     
+                    # Cache mock embeddings too for consistency
+                    mock_cache: dict[str, list[float]] = {}
+                    
                     async def mock_embed(text: str) -> list[float]:
+                        if text in mock_cache:
+                            return mock_cache[text]
+                        
                         hash_bytes = hashlib.sha256(text.encode()).digest()
                         embedding = [
                             (b - 128) / 128.0
@@ -219,6 +240,10 @@ class RAGRetriever(LoggerMixin):
                         embedding = embedding[:self._settings.embedding_dimension]
                         while len(embedding) < self._settings.embedding_dimension:
                             embedding.append(0.0)
+                        
+                        if len(mock_cache) < 1000:
+                            mock_cache[text] = embedding
+                        
                         return embedding
                     
                     self._embed_function = mock_embed
